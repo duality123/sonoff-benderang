@@ -68,12 +68,12 @@ MQTT_TOPIC = "/sonoff_benderang"
 
 MQTT_USERNAME = os.getenv(
     "benderang",
-    ""
+    "benderang"
 )
 
 MQTT_PASSWORD = os.getenv(
     "benderangmqtt",
-    ""
+    "benderangmqtt"
 )
 
 
