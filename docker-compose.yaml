@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  iotdispenser:
+    build: .
+    container_name: sonoff_benderang
+    restart: always
+    ports:
+      - "5252:8000"
+    environment:
+      - TZ=Asia/Jakarta
+    volumes:
+      - .:/app
+    networks:
+      - iot_network
+
+networks:
+  iot_network:
+    driver: bridge
