@@ -3,6 +3,8 @@ import asyncio
 import json
 import logging
 import inspect
+import threading
+import time
 
 from contextlib import asynccontextmanager
 from typing import Any
@@ -14,6 +16,10 @@ from pydantic import BaseModel
 
 from sonoff_manager import SonoffManager
 import paho.mqtt.client as mqtt
+
+# Library Lark Base SDK
+import lark_oapi as lark
+from lark_oapi.api.bitable.v1 import *
 
 
 # ============================================================
@@ -78,12 +84,27 @@ MQTT_PASSWORD = os.getenv(
 
 
 # ============================================================
+# LARK BASE CONFIG (Ubah sesuai token dan table ID Anda)
+# ============================================================
+LARK_APP_ID = "cli_aa49a51c9138de13"       # Masukkan App ID Lark Anda
+LARK_APP_SECRET = "yBbkSeKrGp4vXmeFg69KeWZN4S51NjHX"     # Masukkan App Secret Lark Anda
+LARK_APP_TOKEN = "ZRrib2WlUaQaGtsFYo6jXHwKpCf"      # Masukkan App Token dari URL Lark Base (app...)
+LARK_TABLE_ID = "tbl5P1vUXrzUeTE7"    # Masukkan Table ID dari Lark Base untuk Powermeter (tbl...)
+
+lark_client = lark.Client.builder() \
+    .app_id(LARK_APP_ID) \
+    .app_secret(LARK_APP_SECRET) \
+    .log_level(lark.LogLevel.WARNING) \
+    .build()
+
+
+# ============================================================
 # MQTT CLIENT
 # ============================================================
 
 mqtt_client = mqtt.Client(
     mqtt.CallbackAPIVersion.VERSION2,
-    client_id="sonoff-benderang"
+    client_id="sonoff-benderangtest"
 )
 
 
@@ -96,6 +117,68 @@ manager: SonoffManager | None = None
 latest_devices: list[dict] = []
 
 data_lock = asyncio.Lock()
+
+
+# ============================================================
+# FUNGSI SINKRONISASI LARK BASE (MAX 30 DATA)
+# ============================================================
+def sync_powermeter_to_lark(devices: list[dict]):
+    try:
+        for dev in devices:
+            channels = dev.get("channels", [])
+            for ch in channels:
+                # Format fields sesuai kolom pada gambar: power, energy, voltage, apparent, current, reactive, channel
+                fields = {
+                    "power": str(ch.get("power_w", 0.0)),
+                    "energy": str(ch.get("energy_kwh", 0.0)),
+                    "voltage": str(ch.get("voltage_v", 0.0)),
+                    "apparent": str(ch.get("apparent_power_va", 0.0)),
+                    "current": str(ch.get("current_a", 0.0)),
+                    "reactive": str(ch.get("reactive_power_var", 0.0)),
+                    "channel": str(f"Ch {ch.get('outlet', 0) + 1}")
+                }
+
+                # 1. Insert record baru
+                req_body = CreateAppTableRecordRequest.builder() \
+                    .app_token(LARK_APP_TOKEN) \
+                    .table_id(LARK_TABLE_ID) \
+                    .request_body(AppTableRecord.builder().fields(fields).build()) \
+                    .build()
+
+                response = lark_client.bitable.v1.app_table_record.create(req_body)
+                if not response.success():
+                    log.error(f"Gagal insert Powermeter ke Lark Base: {response.msg}")
+
+        # 2. Cek total baris dan batasi maksimal 30 data (hapus data terlama)
+        list_req = ListAppTableRecordRequest.builder() \
+            .app_token(LARK_APP_TOKEN) \
+            .table_id(LARK_TABLE_ID) \
+            .page_size(100) \
+            .build()
+        
+        list_resp = lark_client.bitable.v1.app_table_record.list(list_req)
+        if list_resp.success() and list_resp.data and list_resp.data.items:
+            records = list_resp.data.items
+            if len(records) > 30:
+                # Ambil kelebihan record terlama untuk dihapus
+                excess_count = len(records) - 30
+                record_ids_to_delete = [rec.record_id for rec in records[:excess_count]]
+                
+                if record_ids_to_delete:
+                    del_body = BatchDeleteAppTableRecordRequestor.builder() \
+                        .records(record_ids_to_delete) \
+                        .build()
+                    
+                    del_req = BatchDeleteAppTableRecordRequest.builder() \
+                        .app_token(LARK_APP_TOKEN) \
+                        .table_id(LARK_TABLE_ID) \
+                        .request_body(del_body) \
+                        .build()
+                    
+                    lark_client.bitable.v1.app_table_record.batch_delete(del_req)
+
+    except Exception as e:
+        log.error(f"Error sinkronisasi Powermeter ke Lark Base: {e}")
 
 
 # ============================================================
@@ -134,7 +217,7 @@ mqtt_client.on_disconnect = mqtt_on_disconnect
 
 
 # ============================================================
-# MQTT PUBLISH
+# MQTT PUBLISH & LARK SYNC
 # ============================================================
 
 def publish_mqtt(devices: list[dict]):
@@ -162,6 +245,8 @@ def publish_mqtt(devices: list[dict]):
                 MQTT_TOPIC,
                 len(devices)
             )
+            # Jalankan sinkronisasi Lark di background thread agar non-blocking
+            threading.Thread(target=sync_powermeter_to_lark, args=(devices,), daemon=True).start()
         else:
             log.error(
                 "MQTT PUBLISH FAILED | rc=%s",
@@ -717,7 +802,7 @@ footer{padding:24px;text-align:center;color:var(--muted);}
 <div id="devices" class="devices"><div class="empty">Mengambil data Sonoff...</div></div>
 </main>
 
-<footer>Benderang • FastAPI • eWeLink • MQTT</footer>
+<footer>Benderang • FastAPI • eWeLink • MQTT • Lark Base</footer>
 
 <script>
 const $=id=>document.getElementById(id);
